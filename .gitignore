@@ -1,0 +1,11 @@
+# Secrets - never commit
+config-s3.php
+
+# Composer dependencies (install with: composer install --no-dev)
+vendor/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
