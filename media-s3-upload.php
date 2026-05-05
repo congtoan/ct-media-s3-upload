@@ -2,8 +2,12 @@
 /**
  * Plugin Name: Cong Toan Media S3 Upload
  * Description: Upload file media WordPress lên Linode Object Storage (S3 compatible). Không thay đổi database.
- * Version: 1.5
+ * Version: 1.6
  * Author: congtoan
+ * 
+ * Changelog v1.6:
+ * - Hỗ trợ fake delete flag từ plugin Media Overwrite by Filename
+ * - Khi fake delete, chỉ xóa thumbnails, giữ nguyên file chính
  */
 if ( ! defined( 'ABSPATH' ) ) exit;
 
@@ -102,7 +106,18 @@ class CT_Media_S3_Upload {
         }
     }
 
+    /**
+     * Xóa file khỏi S3
+     * 🔥 Hỗ trợ fake delete: nếu là fake delete, chỉ xóa thumbnails, giữ file chính
+     */
     public function delete_from_s3($attachment_id) {
+        // 🔥 Kiểm tra fake delete từ plugin Media Overwrite
+        $is_fake_delete = apply_filters( 'media_overwrite_is_fake_delete', false );
+        
+        if ( $is_fake_delete ) {
+            error_log( 'S3 Delete: Fake delete detected for attachment ' . $attachment_id . ' - will preserve main file' );
+        }
+
         $keys_to_delete = [];
 
         // Lấy từ cache trước
@@ -114,20 +129,50 @@ class CT_Media_S3_Upload {
             $keys_to_delete = $this->get_files_from_database($attachment_id);
         }
 
+        $deleted_count = 0;
+        $skipped_count = 0;
+        
         // Xóa từng file trên S3
         foreach ($keys_to_delete as $key) {
             if (empty($key)) continue;
             
+            $normalized_key = str_replace('\\', '/', $key);
+            
+            // 🔥 Nếu là fake delete và key là file chính (không có dimensions) → bỏ qua
+            if ( $is_fake_delete && ! $this->is_thumbnail_key( $normalized_key ) ) {
+                error_log( 'S3 Delete: Preserving main file - ' . $normalized_key );
+                $skipped_count++;
+                continue;
+            }
+            
             try {
                 $this->s3->deleteObject([
                     'Bucket' => S3_BUCKET,
-                    'Key'    => str_replace('\\', '/', $key), // Normalize path cho S3
+                    'Key'    => $normalized_key,
                 ]);
-                error_log('S3 Delete Success: ' . $key);
+                error_log('S3 Delete Success: ' . $normalized_key);
+                $deleted_count++;
             } catch (AwsException $e) {
-                error_log('S3 Delete Error: ' . $e->getMessage() . ' - Key: ' . $key);
+                error_log('S3 Delete Error: ' . $e->getMessage() . ' - Key: ' . $normalized_key);
             }
         }
+        
+        if ( $is_fake_delete ) {
+            error_log( "S3 Delete: Fake delete completed - Deleted: {$deleted_count}, Skipped (main file): {$skipped_count}" );
+        } else {
+            error_log( "S3 Delete: Real delete completed - Deleted: {$deleted_count}" );
+        }
+    }
+
+    /**
+     * 🔥 Kiểm tra xem key có phải là thumbnail không
+     * Thumbnail thường chứa "widthxheight" trong tên file
+     * Ví dụ: image-150x150.jpg, image-300x200.jpg, image-768x512.jpg
+     */
+    private function is_thumbnail_key( string $key ): bool {
+        // Các pattern thường gặp của thumbnail
+        // - 150x150, 300x200, 768x512, 1024x683, 1536x960, 2048x1365
+        return (bool) preg_match( '/-\d+x\d+\./', $key );
     }
 
     /**
